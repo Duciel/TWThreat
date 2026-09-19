@@ -323,11 +323,25 @@ TWT:SetScript("OnEvent", function()
                         twtprint('New version available ' ..
                                 TWT.classColors[TWT.class].c .. 'v' .. verEx[2] .. ' |cffffffff(current version ' ..
                                 TWT.classColors['paladin'].c .. 'v' .. TWT.addonVer .. '|cffffffff)')
-                        twtprint('Update at ' .. TWT.classColors[TWT.class].c .. 'https://github.com/MarcelineVQ/TWThreat')
+                        twtprint('Update at ' .. TWT.classColors[TWT.class].c .. 'https://github.com/octo-addons/TWThreat')
                         TWT.showedUpdateNotification = true
                     end
                 end
                 return true
+            end
+
+            -- healer master target handshake and relayed threat (octo fork)
+            if __substr(arg2, 1, 8) == 'TWT_HMT:' then
+                return TWT.handleHMTRequest(arg2, arg4)
+            end
+            if __substr(arg2, 1, 11) == 'TWT_HMT_OK:' then
+                return TWT.handleHMTOk(arg2, arg4)
+            end
+            if __substr(arg2, 1, 12) == 'TWT_HMT_REM:' then
+                return TWT.handleHMTRemove(arg2, arg4)
+            end
+            if __substr(arg2, 1, 11) == 'TWTRelayV2:' then
+                return TWT.handleRelayPacket(arg2, arg4)
             end
 
             if __substr(arg2, 1, 7) == 'TWT_WHO' then
@@ -709,11 +723,14 @@ function TWTHealerMasterTarget_OnClick()
         return TWT.removeHealerMasterTarget()
     end
 
+    TWT.channel = (GetNumRaidMembers() > 0) and 'RAID' or 'PARTY'
+    TWT.pendingHMT = UnitName('target')
+    TWT.pendingHMTTime = GetTime()
     TWT.send('TWT_HMT:' .. UnitName('target'))
 
     local color = TWT.classColors[TWT.getClass(UnitName('target'))]
 
-    twtprint('Trying to set Healer Master Target to ' .. color.c .. UnitName('target'))
+    twtprint('Asking ' .. color.c .. UnitName('target') .. '|cffffffff to relay threat. They need the octo-addons TWThreat too.')
 
 end
 
@@ -811,20 +828,6 @@ function TWT.handleThreatPacket(packet)
             local perc = __parseint(msgEx[4])
             local melee = msgEx[5] == '1'
 
-            if UnitName('target') and not UnitIsPlayer('target') and TWT.shouldRelay then
-                --relay
-                for i, name in TWT.relayTo do
-                    twtdebug('relaying to ' .. i .. ' ' .. name)
-                end
-                TWT.send('TWTRelayV1' ..
-                        ':' .. UnitName('target') ..
-                        ':' .. player ..
-                        ':' .. msgEx[3] ..
-                        ':' .. threat ..
-                        ':' .. perc ..
-                        ':' .. msgEx[6]);
-            end
-
             local time = time()
 
             if TWT.history[player] then
@@ -846,6 +849,10 @@ function TWT.handleThreatPacket(packet)
                 TWT.tankName = player
             end
         end
+    end
+
+    if TWT.shouldRelay and UnitName('target') and not UnitIsPlayer('target') then
+        TWT.relayThreats()
     end
 
     if not TWT.threats[TWT.name] then
@@ -1052,51 +1059,37 @@ function TWT.combatEnd()
 
 end
 
+function TWT.relayCount()
+    local n = 0
+    for _ in __pairs(TWT.relayTo) do
+        n = n + 1
+    end
+    return n
+end
+
+function TWT.isGroupMember(name)
+    for i = 1, GetNumRaidMembers() do
+        if UnitName('raid' .. i) == name then return true end
+    end
+    for i = 1, GetNumPartyMembers() do
+        if UnitName('party' .. i) == name then return true end
+    end
+    return false
+end
+
+-- TWT.relayTo is a set keyed by healer name. Drops healers who left the group.
 function TWT.checkRelay()
-
     if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then
+        clearTable(TWT.relayTo)
         return false
     end
-
-    if __getn(TWT.relayTo) == 0 then
-        return false
-    end
-
-    -- in raid
-    if TWT.channel == 'RAID' and GetNumRaidMembers() > 0 then
-        for index, name in TWT.relayTo do
-            local found = false
-            for i = 0, GetNumRaidMembers() do
-                if GetRaidRosterInfo(i) and UnitName('raid' .. i) == name then
-                    found = true
-                end
-            end
-            if not found then
-                TWT.relayTo[index] = nil
-                twtdebug(name .. ' removed from relay')
-            end
+    for name in __pairs(TWT.relayTo) do
+        if not TWT.isGroupMember(name) then
+            TWT.relayTo[name] = nil
+            twtdebug(name .. ' removed from relay')
         end
     end
-    if TWT.channel == 'PARTY' and GetNumPartyMembers() > 0 then
-        for index, name in TWT.relayTo do
-            local found = false
-            for i = 1, GetNumPartyMembers() do
-                if UnitName('party' .. i) == name then
-                    found = true
-                end
-            end
-            if not found then
-                TWT.relayTo[index] = nil
-                twtdebug(name .. ' removed from relay')
-            end
-        end
-    end
-
-    if __getn(TWT.relayTo) == 0 then
-        return false
-    end
-
-    return true
+    return TWT.relayCount() > 0
 end
 
 function TWT.checkTargetFrames()
@@ -2522,4 +2515,221 @@ function TWT.sendMyVersion()
     SendAddonMessage(TWT.prefix, "TWTVersion:" .. TWT.addonVer, "GUILD")
     SendAddonMessage(TWT.prefix, "TWTVersion:" .. TWT.addonVer, "RAID")
     SendAddonMessage(TWT.prefix, "TWTVersion:" .. TWT.addonVer, "BATTLEGROUND")
+end
+
+-- ---------------------------------------------------------------------------
+-- Healer master target relay (octo-addons fork)
+--
+-- The server only reports threat for the mob you have targeted, so a healer
+-- who targets party members sees nothing. A healer picks a master target
+-- (usually the tank); that player's client relays the threat packets it
+-- receives, and the healer's meter draws them.
+--
+--   healer -> TWT_HMT:<tank>            request
+--   tank   -> TWT_HMT_OK:<healer>       accepted, relaying starts
+--   tank   -> TWTRelayV2:<mob>#<list>   one compact message per server packet
+--   healer -> TWT_HMT_REM:<tank>        stop
+--
+-- <list> is name:tank:threat:perc:melee; repeated, trimmed to stay under the
+-- addon message size limit.
+-- ---------------------------------------------------------------------------
+
+TWT.relayApi = 'TWTRelayV2:'
+local RELAY_MAX_LEN = 240
+local RELAY_STALE_SECONDS = 3
+
+function TWT.relayThreats()
+    local msg = TWT.relayApi .. UnitName('target') .. '#'
+    for name, data in __pairs(TWT.threats) do
+        local entry = name
+                .. ':' .. (data.tank == true and '1' or '0')
+                .. ':' .. __floor(data.threat or 0)
+                .. ':' .. (__floor((data.perc or 0) * 10 + 0.5) / 10)
+                .. ':' .. (data.melee == true and '1' or '0') .. ';'
+        if __strlen(msg) + __strlen(entry) > RELAY_MAX_LEN then
+            break
+        end
+        msg = msg .. entry
+    end
+    TWT.send(msg)
+end
+
+-- tank side: a healer asked us to relay
+function TWT.handleHMTRequest(msg, sender)
+    local wanted = __substr(msg, 9)
+    if wanted ~= TWT.name or sender == TWT.name then
+        return true
+    end
+    if not TWT.relayTo[sender] then
+        TWT.relayTo[sender] = true
+        twtprint('Relaying threat to ' .. sender .. '.')
+    end
+    TWT.shouldRelay = true
+    TWT.channel = (GetNumRaidMembers() > 0) and 'RAID' or 'PARTY'
+    TWT.send('TWT_HMT_OK:' .. sender)
+    return true
+end
+
+-- tank side: a healer no longer wants the relay
+function TWT.handleHMTRemove(msg, sender)
+    local wanted = __substr(msg, 13)
+    if wanted ~= TWT.name then
+        return true
+    end
+    if TWT.relayTo[sender] then
+        TWT.relayTo[sender] = nil
+        twtprint('Stopped relaying threat to ' .. sender .. '.')
+    end
+    TWT.shouldRelay = TWT.relayCount() > 0
+    return true
+end
+
+-- healer side: the master target accepted
+function TWT.handleHMTOk(msg, sender)
+    local healer = __substr(msg, 12)
+    if healer ~= TWT.name or sender ~= TWT.pendingHMT then
+        return true
+    end
+    TWT.pendingHMT = nil
+    TWT.pendingHMTTime = nil
+    TWT.healerMasterTarget = sender
+    TWT.targetName = ''
+    clearTable(TWT.threats)
+    TWT.cachedSort = nil
+
+    local button = _G['TWTMainSettingsHealerMasterTargetButton']
+    if button then button:SetText(sender) end
+    local nt = _G['TWTMainSettingsHealerMasterTargetButtonNT']
+    if nt then nt:SetVertexColor(0.2, 1, 0.2, 1) end
+
+    twtprint('Healer Master Target set to ' .. sender .. '. You now see threat on their target.')
+    return true
+end
+
+-- healer side: a relayed threat packet from the master target
+function TWT.handleRelayPacket(msg, sender)
+    if TWT.healerMasterTarget == '' or sender ~= TWT.healerMasterTarget then
+        return true
+    end
+    local body = __substr(msg, __strlen(TWT.relayApi) + 1)
+    local sep = __find(body, '#', 1, true)
+    if not sep then
+        return true
+    end
+    local mobName = __substr(body, 1, sep - 1)
+    local playersString = __substr(body, sep + 1)
+
+    clearTable(TWT.threats)
+    TWT.tankName = ''
+    TWT.getClasses()
+
+    local now = time()
+    for _, tData in __pairs(__explode(playersString, ';')) do
+        local ex = __explode(tData, ':')
+        if ex[1] and ex[1] ~= '' and ex[5] then
+            local player = ex[1]
+            local threat = __parseint(ex[3]) or 0
+            if TWT.history[player] then
+                TWT.history[player][now] = threat
+            else
+                TWT.history[player] = {}
+            end
+            TWT.threats[player] = {
+                threat = threat,
+                tank = ex[2] == '1',
+                perc = __parseint(ex[4]) or 0,
+                melee = ex[5] == '1',
+                tps = TWT.calcTPS(player),
+                class = TWT.getClass(player)
+            }
+            if ex[2] == '1' then
+                TWT.tankName = player
+            end
+        end
+    end
+
+    if not TWT.threats[TWT.name] then
+        TWT.threats[TWT.name] = {
+            threat = 0, tank = 0, perc = 0, melee = 0, tps = 0,
+            class = __lower(UnitClass('player'))
+        }
+    end
+
+    TWT.lastRelayTime = GetTime()
+    -- the healer may not have entered combat yet; the data itself means a
+    -- fight is on
+    TWT.inCombat = true
+    TWT.targetName = TWT.unitNameForTitle(mobName)
+    TWT.updateTitleBarText(TWT.targetName)
+
+    TWT.calcAGROPerc()
+    TWT.updateUI('relay')
+    return true
+end
+
+-- healer side housekeeping: clear stale bars, time out unanswered requests,
+-- and drop a master target who left the group
+TWT.relayWatch = CreateFrame('Frame')
+TWT.relayWatch.elapsed = 0
+TWT.relayWatch:SetScript('OnUpdate', function()
+    this.elapsed = this.elapsed + arg1
+    if this.elapsed < 1 then return end
+    this.elapsed = 0
+
+    if TWT.pendingHMT and TWT.pendingHMTTime and GetTime() - TWT.pendingHMTTime > 4 then
+        twtprint('No answer from ' .. TWT.pendingHMT .. '. They need the octo-addons TWThreat and must be in your group.')
+        TWT.pendingHMT = nil
+        TWT.pendingHMTTime = nil
+    end
+
+    if TWT.healerMasterTarget == '' then return end
+
+    if not TWT.isGroupMember(TWT.healerMasterTarget) then
+        twtprint(TWT.healerMasterTarget .. ' left the group.')
+        TWT.removeHealerMasterTarget()
+        return
+    end
+
+    if TWT.lastRelayTime and GetTime() - TWT.lastRelayTime > RELAY_STALE_SECONDS
+            and next(TWT.threats) ~= nil then
+        clearTable(TWT.threats)
+        TWT.cachedSort = nil
+        TWT.targetName = ''
+        TWT.hideThreatFrames(true)
+        TWT.updateTitleBarText()
+        if not UnitAffectingCombat('player') then
+            TWT.inCombat = false
+        end
+    end
+end)
+
+-- /twthmt           set the master target from your current target
+-- /twthmt <name>    set it by name
+-- /twthmt clear     remove it
+SLASH_TWTHMT1 = "/twthmt"
+SlashCmdList["TWTHMT"] = function(cmd)
+    cmd = cmd or ''
+    if __lower(cmd) == 'clear' or __lower(cmd) == 'off' then
+        if TWT.healerMasterTarget ~= '' then
+            TWT.removeHealerMasterTarget()
+        else
+            twtprint('No Healer Master Target is set.')
+        end
+        return
+    end
+    if cmd ~= '' then
+        local name = string.upper(__substr(cmd, 1, 1)) .. __lower(__substr(cmd, 2))
+        if name == TWT.name or not TWT.isGroupMember(name) then
+            twtprint(name .. ' is not in your group.')
+            return
+        end
+        TWT.getClasses()
+        TWT.channel = (GetNumRaidMembers() > 0) and 'RAID' or 'PARTY'
+        TWT.pendingHMT = name
+        TWT.pendingHMTTime = GetTime()
+        TWT.send('TWT_HMT:' .. name)
+        twtprint('Asking ' .. name .. ' to relay threat. They need the octo-addons TWThreat too.')
+        return
+    end
+    TWTHealerMasterTarget_OnClick()
 end

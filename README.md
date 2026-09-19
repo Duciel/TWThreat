@@ -1,9 +1,79 @@
-# TWThreat v1.3.0
-Threat Meter for Turtle WoW
-<br>
-Requirements: in `party` or `raid`, attacking `elite` creatures or `bosses`.
-<br>
+# TWThreat v1.3.0 (octo-addons fork)
+
+Threat meter for OctoWoW and other servers that implement the Turtle WoW threat
+API. Fork of [MarcelineVQ/TWThreat](https://github.com/MarcelineVQ/TWThreat)
+with a working **Healer Master Target** relay.
+
+Requirements: in a `party` or `raid`, attacking `elite` creatures or `bosses`.
+The numbers come from the server, not from the combat log, so the server must
+answer the `TWT_UDTSv4` request. OctoWoW does. `/twtdebug` shows the incoming
+`PACKET` lines if you want to check.
+
+## Installation
+
+In the launcher, choose **Add Addon from Git** and use:
+
+```text
+https://github.com/octo-addons/TWThreat.git
+```
+
+The addon should be installed as `Interface/AddOns/TWThreat`.
+
+## Using it as a healer
+
+The server only reports threat for the mob **you** have targeted. While you
+target a party member to heal, the meter has nothing to show. Two ways around
+that:
+
+**1. Keep the mob targeted and heal without targeting.** Use click-casting
+unit frames (Puppeteer, pfUI click casts) or mouseover macros, and `/assist`
+the tank at the pull. The meter then works exactly as for everyone else and
+needs nothing from anyone.
+
+**2. Healer Master Target (relay).** Pick a group member, normally the tank.
+Their client relays the threat table of *their* target to you, so your meter
+stays filled no matter whom you target.
+
+- Target the tank and type `/twthmt`, or `/twthmt Tankname`, or use the
+  **From Target** button in the settings window.
+- The tank must run this fork too. If they do, you get "Healer Master Target
+  set to ..." and they see "Relaying threat to ...". If nobody answers within
+  a few seconds you are told so.
+- `/twthmt clear` removes it. It is also dropped when the tank leaves the
+  group. Bars clear themselves when the tank stops fighting an elite.
+- The relay adds one addon message per server packet on the tank's side, about
+  two per second, only while at least one healer has asked for it.
+
+Upstream shipped the button but not the code behind it: requests were sent and
+never answered, and the relay sender would have errored on a missing field.
+This fork implements the handshake, the relay and the clean-up.
+
+## Commands
+
+- `/twt` - command list; `/twt show`, `/twt hide`, `/twt toggle`
+- `/twt tankmode`, `/twt skeram`, `/twt who`
+- `/twtshow` - force the main window visible
+- `/twtdebug` - toggle packet debug output
+- `/twthmt [name|clear]` - healer master target
+
+If the window is lost off screen or tiny, this puts it back in the middle at
+full size:
+
+```text
+/run TWTMain:ClearAllPoints() TWTMain:SetPoint("CENTER",UIParent,"CENTER",0,0) TWTMain:SetScale(1) TWTMain:SetAlpha(1) TWTMain:Show()
+```
+
 ## Changes
+
+### 1.3.0-octo1
+- Healer Master Target works: request, confirmation, relay and removal are all
+  implemented, with a timeout message when the chosen player has no compatible
+  addon.
+- Relay sends one compact message per packet instead of one per player, and no
+  longer errors on a missing field.
+- Relay recipients are tracked as a set, so leaving members no longer leave
+  holes in the list.
+- `/twthmt` command.
 
 ### 1.3.0
 - Resistant to losing threat display if an addon is interfering with your targeting.
