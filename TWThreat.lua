@@ -210,10 +210,22 @@ SlashCmdList["TWT"] = function(cmd)
             return true
         end
 
+        if __substr(cmd, 1, 5) == 'share' then
+            TWT_CONFIG.shareThreat = not TWT_CONFIG.shareThreat
+            if TWT_CONFIG.shareThreat then
+                twtprint('Sharing threat with the group enabled.')
+            else
+                twtprint('Sharing threat with the group disabled.')
+            end
+            return true
+        end
+
         twtprint(TWT.addonName .. ' |cffabd473v' .. TWT.addonVer .. '|cffffffff available commands:')
         twtprint('/twt show - shows the main window (also /twtshow)')
         twtprint('/twt hide - hides the main window')
         twtprint('/twt toggle - show/hide the main window')
+        twtprint('/twt share - share your target threat with the group (' ..
+                (TWT_CONFIG.shareThreat and 'on' or 'off') .. ')')
     end
 end
 
@@ -341,6 +353,7 @@ TWT:SetScript("OnEvent", function()
                 return TWT.handleHMTRemove(arg2, arg4)
             end
             if __substr(arg2, 1, 11) == 'TWTRelayV2:' then
+                TWT.noteRelay(arg4)
                 return TWT.handleRelayPacket(arg2, arg4)
             end
 
@@ -526,6 +539,9 @@ function TWT.init()
     TWT_CONFIG.colPerc = TWT_CONFIG.colPerc or false
     TWT_CONFIG.labelRow = TWT_CONFIG.labelRow or false
     TWT_CONFIG.skeram = TWT_CONFIG.skeram or false
+    if TWT_CONFIG.shareThreat == nil then
+        TWT_CONFIG.shareThreat = true
+    end
 
     TWT_CONFIG.combatAlpha = TWT_CONFIG.combatAlpha or 1
     TWT_CONFIG.oocAlpha = TWT_CONFIG.oocAlpha or 1
@@ -851,7 +867,7 @@ function TWT.handleThreatPacket(packet)
         end
     end
 
-    if TWT.shouldRelay and UnitName('target') and not UnitIsPlayer('target') then
+    if (TWT.shouldRelay or TWT.shouldShare()) and UnitName('target') and not UnitIsPlayer('target') then
         TWT.relayThreats()
     end
 
@@ -2538,6 +2554,77 @@ TWT.relayApi = 'TWTRelayV2:'
 local RELAY_MAX_LEN = 240
 local RELAY_STALE_SECONDS = 3
 
+-- ---------------------------------------------------------------------------
+-- Share threat with the group (/twt share, on by default)
+--
+-- Without any /twthmt request, every client also relays the threat table of
+-- its own target with the same TWTRelayV2 message. Healers keep listening to
+-- their master target only, while nameplate addons (pfUI-ThreatPlates) can
+-- show threat on every mob somebody in the group is targeting.
+--
+-- To limit traffic, a client does not share when another group member already
+-- relayed the same mob (same unit as our target) during the last update.
+-- ---------------------------------------------------------------------------
+TWT.relaySeen = {}
+
+function TWT.noteRelay(sender)
+    if sender and sender ~= TWT.name then
+        TWT.relaySeen[sender] = GetTime()
+    end
+end
+
+-- RAID while in a raid, PARTY while in a party, nil when alone
+function TWT.groupChannel()
+    if GetNumRaidMembers() > 0 then
+        return 'RAID'
+    end
+    if GetNumPartyMembers() > 0 then
+        return 'PARTY'
+    end
+    return nil
+end
+
+function TWT.getUnitByName(name)
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do
+            if UnitName('raid' .. i) == name then
+                return 'raid' .. i
+            end
+        end
+    else
+        for i = 1, GetNumPartyMembers() do
+            if UnitName('party' .. i) == name then
+                return 'party' .. i
+            end
+        end
+    end
+    return nil
+end
+
+function TWT.shouldShare()
+    if not TWT_CONFIG.shareThreat then
+        return false
+    end
+    if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then
+        return false
+    end
+
+    local window = TWT.updateSpeed * 0.75
+    local now = GetTime()
+    for sender, seen in __pairs(TWT.relaySeen) do
+        if now - seen > RELAY_STALE_SECONDS then
+            TWT.relaySeen[sender] = nil
+        elseif now - seen < window then
+            local unit = TWT.getUnitByName(sender)
+            if unit and UnitIsUnit(unit .. 'target', 'target') then
+                -- somebody else just shared this mob
+                return false
+            end
+        end
+    end
+    return true
+end
+
 function TWT.relayThreats()
     local msg = TWT.relayApi .. UnitName('target') .. '#'
     for name, data in __pairs(TWT.threats) do
@@ -2551,7 +2638,13 @@ function TWT.relayThreats()
         end
         msg = msg .. entry
     end
-    TWT.send(msg)
+    -- pick the channel now: TWT.channel is only refreshed on target change,
+    -- and the group may have been converted to a raid (or back) since then
+    local channel = TWT.groupChannel()
+    if channel then
+        TWT.channel = channel
+        SendAddonMessage(TWT.prefix, msg, channel)
+    end
 end
 
 -- tank side: a healer asked us to relay

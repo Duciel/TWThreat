@@ -48,6 +48,24 @@ Upstream shipped the button but not the code behind it: requests were sent and
 never answered, and the relay sender would have errored on a missing field.
 This fork implements the handshake, the relay and the clean-up.
 
+## Sharing threat with the group
+
+On top of the Healer Master Target relay, every client shares the threat table
+of **its own target** with the group, using the same `TWTRelayV2` message and
+without any request. This is on by default and toggled with `/twt share`.
+
+- Healers are not affected: their meter still only reads the relay of their
+  master target.
+- Nameplate addons such as pfUI-ThreatPlates read every relay, so each player
+  sees threat on all the mobs the group is targeting, not only on their own
+  target.
+- Traffic stays low: a client skips its relay when another group member
+  relayed the same mob during the last update (one message per mob, about one
+  per second), and nothing is sent outside of a party or raid.
+- Relays always go to the right channel: `RAID` while in a raid, `PARTY`
+  while in a party, picked at send time (a party converted to a raid no
+  longer keeps sending on the old channel).
+
 ## Commands
 
 - `/twt` - command list; `/twt show`, `/twt hide`, `/twt toggle`
@@ -55,6 +73,7 @@ This fork implements the handshake, the relay and the clean-up.
 - `/twtshow` - force the main window visible
 - `/twtdebug` - toggle packet debug output
 - `/twthmt [name|clear]` - healer master target
+- `/twt share` - share your target threat with the group (on by default)
 
 If the window is lost off screen or tiny, this puts it back in the middle at
 full size:
@@ -64,6 +83,15 @@ full size:
 ```
 
 ## Changes
+
+### 1.3.0-octo2
+- Share threat with the group: every client relays the threat table of its
+  target with `TWTRelayV2`, without a `/twthmt` request, so that nameplate
+  addons can show threat on all the mobs the group is fighting.
+  Duplicates are skipped when another member already relayed the same mob.
+  `/twt share` toggles it (on by default).
+- Relays pick `RAID` or `PARTY` at send time instead of reusing the channel
+  cached at the last target change.
 
 ### 1.3.0-octo1
 - Healer Master Target works: request, confirmation, relay and removal are all
